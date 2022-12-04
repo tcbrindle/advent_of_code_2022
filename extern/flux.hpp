@@ -1173,6 +1173,12 @@ public:
         return std::invoke(FLUX_FWD(func), std::move(derived()), FLUX_FWD(args)...);
     }
 
+    template <typename Func, typename... Args>
+        requires std::invocable<Func, Derived, Args...>
+    constexpr auto _(Func&& func, Args&&... args) const&& -> decltype(auto)
+    {
+        return std::invoke(FLUX_FWD(func), std::move(derived()), FLUX_FWD(args)...);
+    }
 
     /*
      * Adaptors
@@ -2862,6 +2868,49 @@ public:
 };
 
 inline constexpr auto chain = detail::chain_fn{};
+
+} // namespace flux
+
+#endif
+
+
+// Copyright (c) 2022 Tristan Brindle (tcbrindle at gmail dot com)
+// Distributed under the Boost Software License, Version 1.0. (See accompanying
+// file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
+
+#ifndef FLUX_OP_CONTAINS_HPP_INCLUDED
+#define FLUX_OP_CONTAINS_HPP_INCLUDED
+
+
+
+namespace flux {
+
+namespace detail {
+
+struct contains_fn {
+    template <sequence Seq, typename Value, typename Proj = std::identity>
+        requires std::equality_comparable_with<projected_t<Proj, Seq>, Value const&>
+    constexpr auto operator()(Seq&& seq, Value const& value, Proj proj = {}) const
+        -> bool
+    {
+        return !flux::is_last(seq, flux::for_each_while(seq, [&](auto&& elem) {
+            return std::invoke(proj, FLUX_FWD(elem)) != value;
+        }));
+    }
+};
+
+
+} // namespace detail
+
+inline constexpr auto contains = detail::contains_fn{};
+
+template <typename D>
+template <typename Value, typename Proj>
+    requires std::equality_comparable_with<projected_t<Proj, D>, Value const&>
+constexpr auto lens_base<D>::contains(Value const& value, Proj proj) -> bool
+{
+    return flux::contains(derived(), value, std::move(proj));
+}
 
 } // namespace flux
 
@@ -6524,6 +6573,124 @@ inline constexpr auto zip = detail::zip_fn{};
 
 
 
+
+// Copyright (c) 2022 Tristan Brindle (tcbrindle at gmail dot com)
+// Distributed under the Boost Software License, Version 1.0. (See accompanying
+// file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
+
+#ifndef FLUX_SOURCE_GENERATOR_HPP_INCLUDED
+#define FLUX_SOURCE_GENERATOR_HPP_INCLUDED
+
+
+
+#include <coroutine>
+#include <iostream>
+#include <utility>
+
+namespace flux {
+
+namespace experimental {
+
+template <typename ElemT>
+struct generator : lens_base<generator<ElemT>> {
+
+    using yielded_type = std::conditional_t<std::is_reference_v<ElemT>,
+                                            ElemT,
+                                            ElemT const&>;
+
+    struct promise_type;
+
+    using handle_type = std::coroutine_handle<promise_type>;
+
+    struct promise_type {
+        auto initial_suspend() { return std::suspend_always{}; }
+
+        auto final_suspend() noexcept { return std::suspend_always{}; }
+
+        auto get_return_object()
+        {
+            return generator(handle_type::from_promise(*this));
+        }
+
+        auto yield_value(yielded_type elem)
+        {
+            ptr_ = std::addressof(elem);
+            return std::suspend_always{};
+        }
+
+        auto unhandled_exception() { throw; }
+
+        void return_void() noexcept {}
+
+        std::add_pointer_t<yielded_type> ptr_;
+    };
+
+private:
+    handle_type coro_;
+
+    explicit generator(handle_type&& handle) : coro_(std::move(handle)) {}
+
+    friend struct sequence_iface<generator>;
+
+public:
+    generator(generator&& other) noexcept
+        : coro_(std::exchange(other.coro_, {}))
+    {}
+
+    generator& operator=(generator&& other) noexcept
+    {
+        std::swap(coro_, other.coro_);
+        return *this;
+    }
+
+    ~generator()
+    {
+        if (coro_) { coro_.destroy(); }
+    }
+};
+
+} // namespace experimental
+
+template <typename T>
+struct sequence_iface<experimental::generator<T>>
+{
+private:
+    struct cursor_type {
+        cursor_type(cursor_type&&) = default;
+        cursor_type& operator=(cursor_type&&) = default;
+    private:
+        cursor_type() = default;
+        friend struct sequence_iface;
+    };
+
+    using self_t = experimental::generator<T>;
+
+public:
+    static auto first(self_t& self) {
+        self.coro_.resume();
+        return cursor_type{};
+    }
+
+    static auto is_last(self_t& self, cursor_type const&) -> bool
+    {
+        return self.coro_.done();
+    }
+
+    static auto inc(self_t& self, cursor_type& cur) -> cursor_type&
+    {
+        self.coro_.resume();
+        return cur;
+    }
+
+    static auto read_at(self_t& self, cursor_type const&) -> decltype(auto)
+    {
+        return static_cast<typename self_t::yielded_type>(*self.coro_.promise().ptr_);
+    }
+};
+
+} // namespace flux
+
+#endif // FLUX_SOURCE_GENERATOR_HPP_INCLUDED
 
 // Copyright (c) 2022 Tristan Brindle (tcbrindle at gmail dot com)
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
