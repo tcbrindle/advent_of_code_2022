@@ -39,15 +39,14 @@ struct instruction { int n, from, to; };
 
 auto parse_instructions = [](std::string_view input)
 {
-    return flux::split_string(input, '\n')
-            .filter([](auto line) { return line.size() > 0; })
-            .map([](auto line) {
-                auto [m, n, f, t] = ctre::match<"move (\\d+) from (\\d+) to (\\d+)">(line);
-                return instruction{.n = aoc::try_parse<int>(n).value(),
-                                   .from = aoc::try_parse<int>(f).value() - 1,
-                                   .to = aoc::try_parse<int>(t).value() - 1};
-            })
-            .to<std::vector>();
+    return flux::from(ctre::tokenize<"move (\\d+) from (\\d+) to (\\d+)\\n?">(input))
+              .map([](auto instr) {
+                    auto [_, n, f, t] = instr;
+                    return instruction{.n = n.to_number(),
+                                       .from = f.to_number() - 1,
+                                       .to = t.to_number() - 1};
+                })
+              .to<std::vector>();
 };
 
 auto parse_input = [](std::string_view input)
@@ -107,8 +106,7 @@ R"(    [D]
 move 1 from 2 to 1
 move 3 from 1 to 3
 move 2 from 2 to 1
-move 1 from 1 to 2
-)";
+move 1 from 1 to 2)";
 
 int main(int argc, char** argv)
 {
