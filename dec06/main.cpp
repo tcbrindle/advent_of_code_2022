@@ -1,29 +1,26 @@
 
 #include "../common.hpp"
 
-auto all_different = [](std::string_view str)
-{
-    for (std::size_t i = 0; i < str.size(); ++i) {
-        for (std::size_t j = i + 1; j < str.size(); ++j) {
-            if (str[i] == str[j]) {
-                return false;
-            }
-        }
-    }
+class bitset32 {
+    std::uint32_t bits_{};
 
-    return true;
+public:
+    constexpr void flip(std::uint32_t pos) { assert(pos < 32); bits_ ^= 1 << pos; }
+    constexpr size_t count() const { return __builtin_popcount(bits_); }
 };
 
 template <std::size_t N>
-auto calculate = [](std::string_view input) {
-    auto i = N;
-    for (; i < input.size(); ++i) {
-        if (all_different(input.substr(i-N, N))) {
-            break;
-        }
-    }
+auto calculate = [](std::string_view str) -> std::size_t {
 
-    return i;
+    bitset32 bits;
+
+    flux::take(str, N).for_each([&](char c) { bits.flip(c - 'a'); });
+
+    return 1 + flux::iota(N, str.size()).for_each_while([&](std::size_t i) {
+        bits.flip(str[i] - 'a');
+        bits.flip(str[i - N] - 'a');
+        return bits.count() != N;
+    });
 };
 
 auto part1 = calculate<4>;
@@ -60,6 +57,5 @@ int main(int argc, char** argv)
     auto const input = aoc::string_from_file(argv[1]);
 
     fmt::print("Part 1: {}\n", part1(input));
-
     fmt::print("Part 2: {}\n", part2(input));
 }
