@@ -91,4 +91,18 @@ constexpr auto string_from_file = [](const char* path)
     return flux::from_istreambuf(file).template to<std::string>();
 };
 
+struct timer {
+    using clock = std::chrono::high_resolution_clock;
+
+    template <typename D = std::chrono::microseconds>
+    auto elapsed() const -> D {
+        return std::chrono::duration_cast<D>(clock::now() - start_);
+    }
+
+    void reset() { start_ = clock::now(); }
+
+private:
+    typename clock::time_point start_ = clock::now();
+};
+
 }
