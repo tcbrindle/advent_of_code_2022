@@ -1,8 +1,6 @@
 
 #include "../common.hpp"
 
-#include "../extern/robin_hood.h"
-
 
 /*
  * Some things that should be in Flux but aren't (yet)
@@ -26,72 +24,52 @@ auto pairwise = []<flux::multipass_sequence Seq>(Seq seq)
     }
 };
 
-auto flatten = []<flux::sequence Seq>(Seq seq)
-    -> flux::generator<flux::element_t<flux::element_t<Seq>>>
+auto flat_map = []<flux::sequence Seq, typename Func>(Seq seq, Func func)
+    -> flux::generator<flux::element_t<std::invoke_result_t<Func&, flux::element_t<Seq>>>>
 {
-    FLUX_FOR(auto&& elem, seq) {
-        FLUX_FOR(auto&& inner, elem) {
-            co_yield inner;
+    FLUX_FOR(auto&& elem, flux::map(std::move(seq), std::move(func))) {
+        FLUX_FOR(auto&& inner, FLUX_FWD(elem)) {
+            co_yield FLUX_FWD(inner);
         }
     }
 };
 
-auto keys = [](flux::adaptable_sequence auto&& seq) {
-    return flux::map(FLUX_FWD(seq), [](auto&& elem) -> decltype(auto) {
-        return FLUX_FWD(elem).first;
-    });
-};
-
-auto values = [](flux::adaptable_sequence auto&& seq) {
-    return flux::map(FLUX_FWD(seq), [](auto&& elem) -> decltype(auto) {
-        return FLUX_FWD(elem).second;
-    });
-};
-
 /*
- * the actual problem solution
+ * The actual problem
  */
+constexpr int x_max = 1000;
+constexpr int y_max = 200;
 
 struct pos_t {
     int x = 0, y = 0;
 
     friend bool operator==(pos_t, pos_t) = default;
     friend auto operator<=>(pos_t, pos_t) = default;
-
     friend constexpr pos_t operator+(pos_t lhs, pos_t rhs) {
-        return {lhs.x + rhs.x, lhs.y + rhs.y };
+        return {lhs.x + rhs.x, lhs.y + rhs.y};
     }
 };
 
-template <>
-struct std::hash<pos_t> {
-    constexpr auto operator()(pos_t p) const -> std::uint64_t {
-        return (uint64_t(p.x) << 32) | p.y;
-    }
+enum class tile {
+    empty, rock, sand
 };
 
-enum class tile_kind { rock, sand };
+struct grid {
+    std::vector<tile> tiles = std::vector<tile>(x_max * y_max, tile::empty);
+    int floor = 0;
 
-//using map_t = std::map<pos_t, tile_kind>;
-//using map_t = std::unordered_map<pos_t, tile_kind>;
-using map_t = robin_hood::unordered_map<pos_t, tile_kind>;
-
-
-struct cave_t {
-    map_t data;
-    int floor;
-
-    bool contains(pos_t pos) const
+    constexpr auto operator[](pos_t p) const -> tile
     {
-        if (pos.y == floor) {
-            return true;
+        if (p.y == floor) {
+            return tile::rock;
         } else {
-            return data.contains(pos);
+            return tiles.at((p.y * x_max) + p.x);
         }
     }
 
-    void emplace(pos_t pos, tile_kind k) {
-        data.emplace(pos, k);
+    constexpr void set(pos_t p, tile t)
+    {
+        tiles.at((p.y * x_max) + p.x) = t;
     }
 };
 
@@ -116,38 +94,43 @@ auto extrapolate = [](auto pair) -> flux::generator<pos_t> {
     }
 };
 
-auto parse = [](std::string_view input) -> cave_t {
-    auto map = flux::split_string(input, '\n')
-                    .filter([](auto line) { return !line.empty(); })
-                    .map([](auto line) {
-                        return flux::split_string(line, " -> ")
-                            .map(parse_pos)
-                            ._(pairwise)
-                            .map(extrapolate)
-                            ._(flatten);
-                    })
-                    ._(flatten)
-                    .map([](pos_t p) { return map_t::value_type(p, tile_kind::rock); })
-                    .to<map_t>();
+auto parse_input = [](std::string_view input) {
+    grid g;
 
-    auto floor = 2 + flux::ref(map)._(keys).max({}, &pos_t::y).value().y;
+    flux::split_string(input, '\n')
+        .filter([](auto line) { return !line.empty(); })
+        ._(flat_map, [](auto line) {
+            return flux::split_string(line, " -> ")
+                .map(parse_pos)
+                ._(pairwise)
+                ._(flat_map, extrapolate);
+        })
+        .for_each([&g](pos_t p) {
+            g.set(p, tile::rock);
+            g.floor = std::max(g.floor, p.y);
+        });
 
-    return cave_t{std::move(map), floor};
+    g.floor += 2;
+
+    return g;
 };
 
 constexpr auto sand_source = pos_t{500, 0};
 
-auto drop_sand = [](cave_t const& cave) -> pos_t {
-
+auto drop_sand = [](grid const& cave) -> pos_t
+{
     pos_t sand = sand_source;
 
     while (sand.y < cave.floor) {
-        if (!cave.contains(sand + pos_t{0, 1})) {
-            sand = sand + pos_t{0, 1};
-        } else if (!cave.contains(sand + pos_t{-1, 1})) {
-            sand = sand + pos_t{-1, 1};
-        } else if (!cave.contains(sand + pos_t{1, 1})) {
-            sand = sand + pos_t{1, 1};
+        constexpr auto dirs = std::array<pos_t, 3>{
+            pos_t{0, 1}, {-1, 1}, {1, 1}
+        };
+
+        auto seq = flux::map(dirs, [&](auto p) { return p + sand; });
+        auto idx = seq.find(tile::empty, [&](pos_t p) { return cave[p]; });
+
+        if (!seq.is_last(idx)) {
+            sand = seq.read_at(idx);
         } else {
             break;
         }
@@ -156,30 +139,31 @@ auto drop_sand = [](cave_t const& cave) -> pos_t {
     return sand;
 };
 
-auto part1 = [](cave_t cave) {
+auto part1 = [](grid cave) {
+
     while (true) {
-        auto sand = drop_sand(cave);
+        pos_t sand = drop_sand(cave);
         if (sand.y == cave.floor - 1) {
             break;
         } else {
-            cave.emplace(sand, tile_kind::sand);
+            cave.set(sand, tile::sand);
         }
     }
 
-    return values(std::move(cave).data).count(tile_kind::sand);
+    return flux::count(cave.tiles, tile::sand);
 };
 
-auto part2 = [](cave_t cave) {
+auto part2 = [](grid cave) {
     while (true) {
-        auto sand = drop_sand(cave);
+        pos_t sand = drop_sand(cave);
         if (sand == sand_source) {
             break;
         } else {
-            cave.emplace(sand, tile_kind::sand);
+            cave.set(sand, tile::sand);
         }
     }
 
-    return 1 + values(std::move(cave).data).count(tile_kind::sand);
+    return 1 + flux::count(cave.tiles, tile::sand);
 };
 
 constexpr auto test_data =
@@ -188,7 +172,7 @@ R"(498,4 -> 498,6 -> 496,6
 )";
 
 auto test = [] {
-    auto cave = parse(test_data);
+    auto cave = parse_input(test_data);
     return part1(cave) == 24
         && part2(cave) == 93;
 };
@@ -204,7 +188,7 @@ int main(int argc, char** argv)
 
     auto const input = aoc::string_from_file(argv[1]);
 
-    auto const cave = parse(input);
+    auto const cave = parse_input(input);
 
     fmt::print("Part 1: {}\n", part1(cave));
     fmt::print("Part 2: {}\n", part2(cave));
